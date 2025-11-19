@@ -54,12 +54,16 @@ def train_step(
         if generator_scaler:
             generator_scaler.scale(content_loss).backward()
             generator_scaler.unscale_(generator_optimizer)
-            clip_grad_norm_(generator.parameters(), max_norm=1.0)
+            clip_grad_norm_(
+                generator.parameters(), max_norm=config.GRADIENT_CLIPPING_VALUE
+            )
             generator_scaler.step(generator_optimizer)
             generator_scaler.update()
         else:
             content_loss.backward()
-            clip_grad_norm_(generator.parameters(), max_norm=1.0)
+            clip_grad_norm_(
+                generator.parameters(), max_norm=config.GRADIENT_CLIPPING_VALUE
+            )
             generator_optimizer.step()
 
         if i % config.PRINT_FREQUENCY == 0:

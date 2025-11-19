@@ -143,20 +143,28 @@ def train_step(
         ):
             if generator_scaler:
                 generator_scaler.unscale_(generator_optimizer)
-                clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                clip_grad_norm_(
+                    generator.parameters(), max_norm=config.GRADIENT_CLIPPING_VALUE
+                )
                 generator_scaler.step(generator_optimizer)
                 generator_scaler.update()
             else:
-                clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                clip_grad_norm_(
+                    generator.parameters(), max_norm=config.GRADIENT_CLIPPING_VALUE
+                )
                 generator_optimizer.step()
 
             if discriminator_scaler:
                 discriminator_scaler.unscale_(discriminator_optimizer)
-                clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+                clip_grad_norm_(
+                    discriminator.parameters(), max_norm=config.GRADIENT_CLIPPING_VALUE
+                )
                 discriminator_scaler.step(discriminator_optimizer)
                 discriminator_scaler.update()
             else:
-                clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+                clip_grad_norm_(
+                    discriminator.parameters(), max_norm=config.GRADIENT_CLIPPING_VALUE
+                )
                 discriminator_optimizer.step()
 
             generator_optimizer.zero_grad()
