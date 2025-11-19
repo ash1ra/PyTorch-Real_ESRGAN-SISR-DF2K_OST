@@ -2,8 +2,10 @@ import math
 from typing import Literal
 
 import torch
-import torch.nn.init as init
 from torch import Tensor, nn
+from torch.nn import functional as F
+from torch.nn import init
+from torch.nn.utils import spectral_norm as snorm
 from torchvision.models import VGG19_Weights, vgg19
 
 import config
@@ -12,14 +14,7 @@ logger = config.create_logger("INFO", __file__)
 
 
 def _init_scaled_weights(module: nn.Module, scale: float):
-    if isinstance(module, nn.Conv2d):
-        init.kaiming_normal_(module.weight.data, a=0.0, mode="fan_in")
-        module.weight.data *= scale
-
-        if module.bias is not None:
-            init.constant_(module.bias.data, 0.0)
-
-    elif isinstance(module, nn.Linear):
+    if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
         init.kaiming_normal_(module.weight.data, a=0.0, mode="fan_in")
         module.weight.data *= scale
 
@@ -34,30 +29,49 @@ class ConvBlock(nn.Module):
         out_channels: int,
         kernel_size: int,
         stride: int = 1,
-        norm_layer: bool = False,
+        padding: int = 1,
         activation: Literal["leaky_relu", "tanh"] | None = None,
+        spectral_norm: bool = False,
+        bias: bool = False,
     ) -> None:
         super().__init__()
 
         self.conv_block = nn.Sequential()
 
-        self.conv_block.append(
-            nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=kernel_size // 2,
+        if spectral_norm:
+            self.conv_block.append(
+                snorm(
+                    nn.Conv2d(
+                        in_channels=in_channels,
+                        out_channels=out_channels,
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                        bias=bias,
+                    )
+                )
             )
-        )
-
-        if norm_layer:
-            self.conv_block.append(nn.BatchNorm2d(out_channels))
+        else:
+            self.conv_block.append(
+                nn.Conv2d(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    bias=bias,
+                )
+            )
 
         if activation:
             match activation.lower():
                 case "leaky_relu":
-                    self.conv_block.append(nn.LeakyReLU(0.2))
+                    self.conv_block.append(
+                        nn.LeakyReLU(
+                            negative_slope=config.LEAKY_RELU_NEGATIVE_SLOPE_VALUE,
+                            inplace=True,
+                        )
+                    )
                 case "tanh":
                     self.conv_block.append(nn.Tanh())
 
@@ -186,7 +200,7 @@ class Generator(nn.Module):
             kernel_size=large_kernel_size,
         )
 
-        self.rrdb = nn.Sequential(
+        self.rrdb_sequence = nn.Sequential(
             *[
                 RRDB(
                     channels_count=channels_count,
@@ -230,7 +244,7 @@ class Generator(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         output = self.conv_block1(x)
         residual = output
-        output = self.rrdb(output)
+        output = self.rrdb_sequence(output)
         output = self.conv_block2(output)
         output += residual
         output = self.subpixel_conv_blocks(output)
@@ -242,58 +256,147 @@ class Generator(nn.Module):
 class Discriminator(nn.Module):
     def __init__(
         self,
+        in_channels: int,
         channels_count: int,
-        kernel_size: int,
-        conv_blocks_count: int,
-        linear_layer_size: int,
     ) -> None:
         super().__init__()
 
-        conv_blocks = []
-
-        conv_blocks.append(
-            ConvBlock(
-                in_channels=3,
-                out_channels=channels_count,
-                kernel_size=kernel_size,
-                activation="leaky_relu",
-            )
+        self.conv0 = ConvBlock(
+            in_channels=in_channels,
+            out_channels=channels_count,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=False,
+            bias=True,
         )
 
-        in_channels = channels_count
+        self.conv1 = ConvBlock(
+            in_channels=channels_count,
+            out_channels=channels_count * 2,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=True,
+            bias=False,
+        )
 
-        for i in range(1, conv_blocks_count):
-            out_channels = in_channels * 2 if i % 2 == 0 else in_channels
-            stride = 1 if i % 2 == 0 else 2
+        self.conv2 = ConvBlock(
+            in_channels=channels_count * 2,
+            out_channels=channels_count * 4,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=True,
+            bias=False,
+        )
 
-            conv_blocks.append(
-                ConvBlock(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    kernel_size=kernel_size,
-                    stride=stride,
-                    norm_layer=True,
-                    activation="leaky_relu",
-                )
-            )
+        self.conv3 = ConvBlock(
+            in_channels=channels_count * 4,
+            out_channels=channels_count * 8,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=True,
+            bias=False,
+        )
 
-            in_channels = out_channels
+        self.conv4 = ConvBlock(
+            in_channels=channels_count * 8,
+            out_channels=channels_count * 4,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=True,
+            bias=False,
+        )
 
-        self.layers = nn.Sequential(
-            *conv_blocks,
-            nn.AdaptiveAvgPool2d((6, 6)),
-            nn.Flatten(),
-            nn.Linear(in_channels * 6 * 6, linear_layer_size),
-            nn.LeakyReLU(0.2),
-            nn.Linear(linear_layer_size, 1),
+        self.conv5 = ConvBlock(
+            in_channels=channels_count * 4,
+            out_channels=channels_count * 2,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=True,
+            bias=False,
+        )
+
+        self.conv6 = ConvBlock(
+            in_channels=channels_count * 2,
+            out_channels=channels_count,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=True,
+            bias=False,
+        )
+
+        self.conv7 = ConvBlock(
+            in_channels=channels_count,
+            out_channels=channels_count,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=True,
+            bias=False,
+        )
+
+        self.conv8 = ConvBlock(
+            in_channels=channels_count,
+            out_channels=channels_count,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            activation="leaky_relu",
+            spectral_norm=True,
+            bias=False,
+        )
+
+        self.conv9 = ConvBlock(
+            in_channels=channels_count,
+            out_channels=1,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            activation=None,
+            spectral_norm=False,
+            bias=True,
         )
 
         self.apply(
             lambda fn: _init_scaled_weights(fn, scale=config.WEIGHTS_SCALING_VALUE)
         )
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.layers(x)
+def forward(self, x: Tensor) -> Tensor:
+        x0 = self.conv0(x)
+        x1 = self.conv1(x0)
+        x2 = self.conv2(x1)
+
+        x3 = F.interpolate(
+            self.conv3(x2), scale_factor=2, mode="bilinear", align_corners=False
+        )
+
+        x4 = F.interpolate(
+            self.conv4(x3) + x2, scale_factor=2, mode="bilinear", align_corners=False
+        )
+
+        x5 = F.interpolate(
+            self.conv5(x4) + x1, scale_factor=2, mode="bilinear", align_corners=False
+        )
+
+        output = self.conv7(self.conv6(x5) + x0)
+        output = self.conv8(output)
+        output = self.conv9(output)
+
+        return output
 
 
 class TruncatedVGG19(nn.Module):
