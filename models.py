@@ -89,11 +89,10 @@ class SubPixelConvBlock(nn.Module):
         super().__init__()
 
         self.subpixel_conv_block = nn.Sequential(
-            nn.Conv2d(
+            ConvBlock(
                 in_channels=channels_count,
                 out_channels=channels_count * (scaling_factor**2),
                 kernel_size=kernel_size,
-                padding=kernel_size // 2,
             ),
             nn.PixelShuffle(upscale_factor=scaling_factor),
             nn.PReLU(),
@@ -113,7 +112,7 @@ class ResDenseBlock(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.conv_layers_count = conv_layers_count  # type: ignore
+        self.conv_layers_count: int = conv_layers_count
         self.conv_layers = nn.ModuleList()
 
         self.conv_layers.append(
@@ -371,47 +370,58 @@ class Discriminator(nn.Module):
             bias=True,
         )
 
-        self.apply(
-            lambda fn: _init_scaled_weights(fn, scale=config.WEIGHTS_SCALING_VALUE)
-        )
 
 def forward(self, x: Tensor) -> Tensor:
-        x0 = self.conv0(x)
-        x1 = self.conv1(x0)
-        x2 = self.conv2(x1)
+    x0 = self.conv0(x)
+    x1 = self.conv1(x0)
+    x2 = self.conv2(x1)
 
-        x3 = F.interpolate(
-            self.conv3(x2), scale_factor=2, mode="bilinear", align_corners=False
-        )
+    x3 = F.interpolate(
+        self.conv3(x2), scale_factor=2, mode="bilinear", align_corners=False
+    )
 
-        x4 = F.interpolate(
-            self.conv4(x3) + x2, scale_factor=2, mode="bilinear", align_corners=False
-        )
+    x4 = F.interpolate(
+        self.conv4(x3) + x2, scale_factor=2, mode="bilinear", align_corners=False
+    )
 
-        x5 = F.interpolate(
-            self.conv5(x4) + x1, scale_factor=2, mode="bilinear", align_corners=False
-        )
+    x5 = F.interpolate(
+        self.conv5(x4) + x1, scale_factor=2, mode="bilinear", align_corners=False
+    )
 
-        output = self.conv7(self.conv6(x5) + x0)
-        output = self.conv8(output)
-        output = self.conv9(output)
+    output = self.conv7(self.conv6(x5) + x0)
+    output = self.conv8(output)
+    output = self.conv9(output)
 
-        return output
+    return output
 
 
 class TruncatedVGG19(nn.Module):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
+
+        self.layers: dict = {
+            2: "conv1_2",
+            7: "conv2_2",
+            16: "conv3_4",
+            25: "conv4_4",
+            34: "conv5_4",
+        }
 
         vgg19_model = vgg19(weights=VGG19_Weights.DEFAULT)
 
-        self.features = nn.Sequential(*list(vgg19_model.features.children())[:35])
+        self.features = vgg19_model.features[:35]
 
         self.features.eval()
         for param in self.features.parameters():
             param.requires_grad = False
 
-    def forward(self, x: Tensor) -> Tensor:
-        output = self.features(x)
+    def forward(self, x: Tensor) -> dict[str, Tensor]:
+        output = {}
+
+        for i, layer in enumerate(self.features):
+            x = layer(x)
+
+            if i in self.layers:
+                output[self.layers[i]] = x.clone()
 
         return output
