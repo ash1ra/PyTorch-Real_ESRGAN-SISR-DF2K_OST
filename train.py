@@ -14,6 +14,7 @@ from data_processing import SRDataset
 from models import Discriminator, Generator, TruncatedVGG19
 from utils import (
     Metrics,
+    EMAModel,
     convert_img,
     create_hyperparameters_str,
     format_time,
@@ -30,6 +31,7 @@ def train_step(
     generator: nn.Module,
     discriminator: nn.Module,
     truncated_vgg19: nn.Module,
+    ema_handler: EMAModel,
     perceptual_loss_fn: nn.Module,
     pixel_loss_fn: nn.Module,
     adversarial_loss_fn: nn.Module,
@@ -110,6 +112,8 @@ def train_step(
             generator_scaler.scale(generator_loss_w_graph).backward()
         else:
             generator_loss_w_graph.backward()
+
+        ema_handler.update()
 
         with autocast(device, enabled=(discriminator_scaler is not None)):
             hr_discriminated = discriminator(hr_img_tensor)
@@ -249,6 +253,7 @@ def train(
     generator: nn.Module,
     discriminator: nn.Module,
     truncated_vgg19: nn.Module,
+    ema_handler: EMAModel,
     perceptual_loss_fn: nn.Module,
     pixel_loss_fn: nn.Module,
     adversarial_loss_fn: nn.Module,
@@ -319,6 +324,7 @@ def train(
                 generator=generator,
                 discriminator=discriminator,
                 truncated_vgg19=truncated_vgg19,
+                ema_handler=ema_handler,
                 perceptual_loss_fn=perceptual_loss_fn,
                 pixel_loss_fn=pixel_loss_fn,
                 adversarial_loss_fn=adversarial_loss_fn,
@@ -334,7 +340,7 @@ def train(
             generator_val_loss, generator_val_psnr, generator_val_ssim = (
                 validation_step(
                     data_loader=val_data_loader,
-                    generator=generator,
+                    generator=ema_handler.target_model,
                     truncated_vgg19=truncated_vgg19,
                     perceptual_loss_fn=perceptual_loss_fn,
                     psnr_metric=psnr_metric,
@@ -380,7 +386,7 @@ def train(
                 save_checkpoint(
                     checkpoint_dir_path=config.BEST_ESRGAN_CHECKPOINT_DIR_PATH,
                     epoch=epoch,
-                    generator=generator,
+                    generator=ema_handler.target_model,
                     discriminator=discriminator,
                     generator_optimizer=generator_optimizer,
                     discriminator_optimizer=discriminator_optimizer,
@@ -465,6 +471,16 @@ def main() -> None:
     )
 
     generator = Generator(
+        channels_count=config.GENERATOR_CHANNELS_COUNT,
+        growth_channels_count=config.GENERATOR_GROWTHS_CHANNELS_COUNT,
+        large_kernel_size=config.GENERATOR_LARGE_KERNEL_SIZE,
+        small_kernel_size=config.GENERATOR_SMALL_KERNEL_SIZE,
+        res_dense_blocks_count=config.GENERATOR_RES_DENSE_BLOCKS_COUNT,
+        rrdb_count=config.GENERATOR_RRDB_COUNT,
+        scaling_factor=config.SCALING_FACTOR,
+    ).to(device)
+
+    ema_generator = Generator(
         channels_count=config.GENERATOR_CHANNELS_COUNT,
         growth_channels_count=config.GENERATOR_GROWTHS_CHANNELS_COUNT,
         large_kernel_size=config.GENERATOR_LARGE_KERNEL_SIZE,
@@ -576,12 +592,17 @@ def main() -> None:
                 "ESRGAN checkpoints not found, start training from the beginning..."
             )
 
+    ema_handler = EMAModel(
+        source_model=generator, target_model=ema_generator, decay=0.999
+    )
+
     train(
         train_data_loader=train_data_loader,
         val_data_loader=val_data_loader,
         generator=generator,
         discriminator=discriminator,
         truncated_vgg19=truncated_vgg19,
+        ema_handler=ema_handler,
         perceptual_loss_fn=perceptual_loss_fn,
         pixel_loss_fn=pixel_loss_fn,
         adversarial_loss_fn=adversarial_loss_fn,

@@ -36,6 +36,33 @@ class Metrics:
     generator_val_ssims: list[float] = field(default_factory=list)
 
 
+class EMAModel:
+    def __init__(
+        self, source_model: nn.Module, target_model: nn.Module, decay: float = 0.999
+    ):
+        self.source_model = source_model
+        self.target_model = target_model
+        self.decay = decay
+
+        self.target_model.eval()
+        for param in self.target_model.parameters():
+            param.requires_grad = False
+
+        self.target_model.load_state_dict(self.source_model.state_dict())
+
+    def update(self):
+        with torch.no_grad():
+            for s_param, t_param in zip(
+                self.source_model.parameters(), self.target_model.parameters()
+            ):
+                t_param.data.lerp_(s_param.data, 1.0 - self.decay)
+
+            for s_buffer, t_buffer in zip(
+                self.source_model.buffers(), self.target_model.buffers()
+            ):
+                t_buffer.data.copy_(s_buffer.data)
+
+
 class ImgDegradationPipeline:
     def __init__(self, scaling_factor: int):
         self.scaling_factor = scaling_factor
