@@ -42,6 +42,12 @@ NUM_WORKERS = 8
 TILE_SIZE = 512
 TILE_OVERLAP = 64
 
+# USM-sharpening parameters
+USE_USM_SHARPENING = False
+USM_AMOUNT = 1.2
+USM_RADIUS = 50
+USM_THRESHOLD = 10
+
 # Loss calculation parameters
 PERCEPTUAL_LOSS_LAYER_WEIGHTS = {
     "conv1_2": 0.1,

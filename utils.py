@@ -314,6 +314,27 @@ class ImgDegradationPipeline:
         return out_rgb
 
 
+def apply_usm_sharpening(img: np.ndarray, amount: float, radius: int, threshold: int):
+    if radius % 2 == 0:
+        radius += 1
+
+    img_float = img.astype(np.float32)
+
+    blurred = cv2.GaussianBlur(img_float, (radius, radius), 0)
+
+    diff = img_float - blurred
+
+    if threshold > 0:
+        mask = np.abs(diff) >= threshold
+        diff *= mask
+
+    sharpened = img_float + amount * diff
+
+    sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+
+    return sharpened
+
+
 def create_hr_and_lr_imgs(
     img_path: str | Path,
     scaling_factor: Literal[2, 4, 8],
@@ -370,6 +391,16 @@ def create_hr_and_lr_imgs(
         lr_img_tensor = lr_transforms(hr_img_tensor)
     elif img_degradation_pipeline:
         hr_img_np = hr_img_tensor.permute(1, 2, 0).numpy()
+
+        if config.USE_USM_SHARPENING:
+            hr_img_np = apply_usm_sharpening(
+                img=hr_img_np,
+                amount=config.USM_AMOUNT,
+                radius=config.USM_RADIUS,
+                threshold=config.USM_THRESHOLD,
+            )
+            hr_img_tensor = torch.from_numpy(hr_img_np).permute(2, 0, 1)
+
         lr_img_np = img_degradation_pipeline.process(hr_img_np)
         lr_img_tensor = torch.from_numpy(lr_img_np).permute(2, 0, 1)
     else:
