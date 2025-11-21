@@ -85,7 +85,7 @@ def main() -> None:
     ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
 
     _ = load_checkpoint(
-        checkpoint_dir_path=config.BEST_ESRGAN_CHECKPOINT_DIR_PATH,
+        checkpoint_dir_path=config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH,
         generator=generator,
         test_mode=True,
     )

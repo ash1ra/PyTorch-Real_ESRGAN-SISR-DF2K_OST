@@ -384,7 +384,7 @@ def train(
                     f"New best model found with val loss: {best_val_loss:.4f} at epoch {epoch}"
                 )
                 save_checkpoint(
-                    checkpoint_dir_path=config.BEST_ESRGAN_CHECKPOINT_DIR_PATH,
+                    checkpoint_dir_path=config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH,
                     epoch=epoch,
                     generator=ema_handler.target_model,
                     discriminator=discriminator,
@@ -398,7 +398,7 @@ def train(
                 )
 
             save_checkpoint(
-                checkpoint_dir_path=config.ESRGAN_CHECKPOINT_DIR_PATH,
+                checkpoint_dir_path=config.REAL_ESRGAN_CHECKPOINT_DIR_PATH,
                 epoch=epoch,
                 generator=generator,
                 discriminator=discriminator,
@@ -418,7 +418,7 @@ def train(
     except KeyboardInterrupt:
         logger.info("Saving model's weights and finish training...")
         save_checkpoint(
-            checkpoint_dir_path=config.ESRGAN_CHECKPOINT_DIR_PATH,
+            checkpoint_dir_path=config.REAL_ESRGAN_CHECKPOINT_DIR_PATH,
             epoch=epoch,
             generator=generator,
             discriminator=discriminator,
@@ -527,12 +527,12 @@ def main() -> None:
 
     start_epoch = 1
 
-    if config.INITIALIZE_WITH_PSNR_CHECKPOINT:
-        if config.BEST_PSNR_CHECKPOINT_DIR_PATH.exists():
-            checkpoint_dir_path_to_load = config.BEST_PSNR_CHECKPOINT_DIR_PATH
+    if config.INITIALIZE_WITH_REAL_ESRNET_CHECKPOINT:
+        if config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH.exists():
+            checkpoint_dir_path_to_load = config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH
 
             logger.info(
-                f'Initializing Generator with the best PSNR-trained weights from "{checkpoint_dir_path_to_load}"...'
+                f'Initializing Generator with the best ESRNET weights from "{checkpoint_dir_path_to_load}"...'
             )
 
             _ = load_checkpoint(
@@ -543,24 +543,26 @@ def main() -> None:
             )
         else:
             logger.warning(
-                "PSNR checkpoint not found, start training from the beginning..."
+                "ESRNET checkpoint not found, start training from the beginning..."
             )
 
-    if config.LOAD_ESRGAN_CHECKPOINT:
+    if config.LOAD_REAL_ESRGAN_CHECKPOINT:
         if (
-            config.BEST_ESRGAN_CHECKPOINT_DIR_PATH.exists()
-            or config.ESRGAN_CHECKPOINT_DIR_PATH.exists()
+            config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH.exists()
+            or config.REAL_ESRGAN_CHECKPOINT_DIR_PATH.exists()
         ):
             if (
                 config.LOAD_BEST_ESRGAN_CHECKPOINT
-                and config.BEST_ESRGAN_CHECKPOINT_DIR_PATH.exists()
+                and config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH.exists()
             ):
-                checkpoint_dir_path_to_load = config.BEST_ESRGAN_CHECKPOINT_DIR_PATH
+                checkpoint_dir_path_to_load = (
+                    config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH
+                )
                 logger.info(
                     f'Loading best ESRGAN checkpoint from "{checkpoint_dir_path_to_load}"...'
                 )
-            elif config.ESRGAN_CHECKPOINT_DIR_PATH.exists():
-                checkpoint_dir_path_to_load = config.ESRGAN_CHECKPOINT_DIR_PATH
+            elif config.REAL_ESRGAN_CHECKPOINT_DIR_PATH.exists():
+                checkpoint_dir_path_to_load = config.REAL_ESRGAN_CHECKPOINT_DIR_PATH
                 logger.info(
                     f'Loading ESRGAN checkpoint from "{checkpoint_dir_path_to_load}"...'
                 )

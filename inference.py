@@ -189,16 +189,17 @@ def inference(
 
     if use_network_interpolation:
         if (
-            config.BEST_PSNR_CHECKPOINT_DIR_PATH / "generator.safetensors"
+            config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH / "generator.safetensors"
         ).exists() and (
-            config.BEST_ESRGAN_CHECKPOINT_DIR_PATH / "generator.safetensors"
+            config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH / "generator.safetensors"
         ).exists():
             params_psnr = load_file(
-                filename=config.BEST_PSNR_CHECKPOINT_DIR_PATH / "generator.safetensors",
+                filename=config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH
+                / "generator.safetensors",
                 device=device,
             )
             params_esrgan = load_file(
-                filename=config.BEST_ESRGAN_CHECKPOINT_DIR_PATH
+                filename=config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH
                 / "generator.safetensors",
                 device=device,
             )
@@ -276,12 +277,14 @@ def main() -> None:
     ).to(device)
 
     _ = load_checkpoint(
-        checkpoint_dir_path=config.BEST_ESRGAN_CHECKPOINT_DIR_PATH,
+        checkpoint_dir_path=config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH,
         generator=generator,
         test_mode=True,
     )
 
-    logger.info(f"Model {config.BEST_ESRGAN_CHECKPOINT_DIR_PATH} loaded on {device}")
+    logger.info(
+        f"Model {config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH} loaded on {device}"
+    )
 
     generator.eval()
 

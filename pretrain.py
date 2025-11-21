@@ -151,7 +151,7 @@ def train(
     logger.info(f"Epochs: {config.EPOCHS}")
     logger.info(f"Number of workers: {config.NUM_WORKERS}")
     logger.info("-" * dashes_count)
-    logger.info("PSNR-based Generator:")
+    logger.info("ESRNET Generator:")
     logger.info(f"Count of channels: {config.GENERATOR_CHANNELS_COUNT}")
     logger.info(f"Count of growths channels: {config.GENERATOR_GROWTHS_CHANNELS_COUNT}")
     logger.info(
@@ -220,7 +220,7 @@ def train(
                     f"New best model found with val loss: {best_val_psnr:.4f} at epoch {epoch}"
                 )
                 save_checkpoint(
-                    checkpoint_dir_path=config.BEST_PSNR_CHECKPOINT_DIR_PATH,
+                    checkpoint_dir_path=config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH,
                     epoch=epoch,
                     generator=generator,
                     generator_optimizer=generator_optimizer,
@@ -230,7 +230,7 @@ def train(
                 )
 
             save_checkpoint(
-                checkpoint_dir_path=config.PSNR_CHECKPOINT_DIR_PATH,
+                checkpoint_dir_path=config.REAL_ESRNET_CHECKPOINT_DIR_PATH,
                 epoch=epoch,
                 generator=generator,
                 generator_optimizer=generator_optimizer,
@@ -244,7 +244,7 @@ def train(
     except KeyboardInterrupt:
         logger.info("Saving model's weights and finish training...")
         save_checkpoint(
-            checkpoint_dir_path=config.PSNR_CHECKPOINT_DIR_PATH,
+            checkpoint_dir_path=config.REAL_ESRNET_CHECKPOINT_DIR_PATH,
             epoch=epoch,
             generator=generator,
             generator_optimizer=generator_optimizer,
@@ -317,21 +317,23 @@ def main() -> None:
     )
 
     start_epoch = 1
-    if config.LOAD_PSNR_CHECKPOINT:
+    if config.LOAD_REAL_ESRNET_CHECKPOINT:
         if (
-            config.BEST_PSNR_CHECKPOINT_DIR_PATH.exists()
-            or config.PSNR_CHECKPOINT_DIR_PATH.exists()
+            config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH.exists()
+            or config.REAL_ESRNET_CHECKPOINT_DIR_PATH.exists()
         ):
             if (
-                config.LOAD_BEST_PSNR_CHECKPOINT
-                and config.BEST_PSNR_CHECKPOINT_DIR_PATH.exists()
+                config.LOAD_BEST_REAL_ESRNET_CHECKPOINT
+                and config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH.exists()
             ):
-                checkpoint_dir_path_to_load = config.BEST_PSNR_CHECKPOINT_DIR_PATH
+                checkpoint_dir_path_to_load = (
+                    config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH
+                )
                 logger.info(
                     f'Loading best checkpoint from "{checkpoint_dir_path_to_load}"...'
                 )
-            elif config.PSNR_CHECKPOINT_DIR_PATH.exists():
-                checkpoint_dir_path_to_load = config.PSNR_CHECKPOINT_DIR_PATH
+            elif config.REAL_ESRNET_CHECKPOINT_DIR_PATH.exists():
+                checkpoint_dir_path_to_load = config.REAL_ESRNET_CHECKPOINT_DIR_PATH
                 logger.info(
                     f'Loading checkpoint from "{checkpoint_dir_path_to_load}"...'
                 )
