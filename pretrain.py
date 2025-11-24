@@ -151,7 +151,7 @@ def train(
     logger.info(f"Epochs: {config.EPOCHS}")
     logger.info(f"Number of workers: {config.NUM_WORKERS}")
     logger.info("-" * dashes_count)
-    logger.info("ESRNET Generator:")
+    logger.info("Real-ESRNET Generator:")
     logger.info(f"Count of channels: {config.GENERATOR_CHANNELS_COUNT}")
     logger.info(f"Count of growths channels: {config.GENERATOR_GROWTHS_CHANNELS_COUNT}")
     logger.info(
@@ -315,6 +315,25 @@ def main() -> None:
         milestones=config.SCHEDULER_MILESTONES,
         gamma=config.SCHEDULER_SCALING_VALUE,
     )
+
+    if config.INITIALIZE_WITH_ESRGAN_CHECKPOINT:
+        if config.BEST_ESRGAN_CHECKPOINT_DIR_PATH.exists():
+            checkpoint_dir_path_to_load = config.BEST_ESRGAN_CHECKPOINT_DIR_PATH
+
+            logger.info(
+                f'Initializing Generator with the best ESRGAN weights from "{checkpoint_dir_path_to_load}"...'
+            )
+
+            _ = load_checkpoint(
+                checkpoint_dir_path=checkpoint_dir_path_to_load,
+                generator=generator,
+                test_mode=True,
+                device=device,
+            )
+        else:
+            logger.warning(
+                "ESRGAN checkpoint not found, start training from the beginning..."
+            )
 
     start_epoch = 1
     if config.LOAD_REAL_ESRNET_CHECKPOINT:
