@@ -197,6 +197,7 @@ class Generator(nn.Module):
             in_channels=3,
             out_channels=channels_count,
             kernel_size=large_kernel_size,
+            padding=4,
         )
 
         self.rrdb_sequence = nn.Sequential(
@@ -233,6 +234,7 @@ class Generator(nn.Module):
             in_channels=channels_count,
             out_channels=3,
             kernel_size=large_kernel_size,
+            padding=4,
             activation="tanh",
         )
 
@@ -370,29 +372,28 @@ class Discriminator(nn.Module):
             bias=True,
         )
 
+    def forward(self, x: Tensor) -> Tensor:
+        x0 = self.conv0(x)
+        x1 = self.conv1(x0)
+        x2 = self.conv2(x1)
 
-def forward(self, x: Tensor) -> Tensor:
-    x0 = self.conv0(x)
-    x1 = self.conv1(x0)
-    x2 = self.conv2(x1)
+        x3 = F.interpolate(
+            self.conv3(x2), scale_factor=2, mode="bilinear", align_corners=False
+        )
 
-    x3 = F.interpolate(
-        self.conv3(x2), scale_factor=2, mode="bilinear", align_corners=False
-    )
+        x4 = F.interpolate(
+            self.conv4(x3) + x2, scale_factor=2, mode="bilinear", align_corners=False
+        )
 
-    x4 = F.interpolate(
-        self.conv4(x3) + x2, scale_factor=2, mode="bilinear", align_corners=False
-    )
+        x5 = F.interpolate(
+            self.conv5(x4) + x1, scale_factor=2, mode="bilinear", align_corners=False
+        )
 
-    x5 = F.interpolate(
-        self.conv5(x4) + x1, scale_factor=2, mode="bilinear", align_corners=False
-    )
+        output = self.conv7(self.conv6(x5) + x0)
+        output = self.conv8(output)
+        output = self.conv9(output)
 
-    output = self.conv7(self.conv6(x5) + x0)
-    output = self.conv8(output)
-    output = self.conv9(output)
-
-    return output
+        return output
 
 
 class TruncatedVGG19(nn.Module):

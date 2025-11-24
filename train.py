@@ -288,7 +288,7 @@ def train(
     logger.info(f"Epochs: {config.EPOCHS}")
     logger.info(f"Number of workers: {config.NUM_WORKERS}")
     logger.info("-" * dashes_count)
-    logger.info("ESRGAN Generator:")
+    logger.info("Real-ESRGAN Generator:")
     logger.info(f"Count of channels: {config.GENERATOR_CHANNELS_COUNT}")
     logger.info(f"Count of growths channels: {config.GENERATOR_GROWTHS_CHANNELS_COUNT}")
     logger.info(
@@ -301,7 +301,7 @@ def train(
     logger.info(f"Small kernel size: {config.GENERATOR_SMALL_KERNEL_SIZE}")
     logger.info(f"Generator initial learning rate: {config.GENERATOR_LEARNING_RATE}")
     logger.info("-" * dashes_count)
-    logger.info("Discriminator:")
+    logger.info("U-Net Discriminator:")
     logger.info(f"Count of channels: {config.DISCRIMINATOR_CHANNELS_COUNT}")
     logger.info(f"Count of Conv blocks: {config.DISCRIMINATOR_CONV_BLOCKS_COUNT}")
     logger.info(
@@ -532,7 +532,7 @@ def main() -> None:
             checkpoint_dir_path_to_load = config.BEST_REAL_ESRNET_CHECKPOINT_DIR_PATH
 
             logger.info(
-                f'Initializing Generator with the best ESRNET weights from "{checkpoint_dir_path_to_load}"...'
+                f'Initializing Generator with the best Real-ESRNET weights from "{checkpoint_dir_path_to_load}"...'
             )
 
             _ = load_checkpoint(
@@ -543,7 +543,7 @@ def main() -> None:
             )
         else:
             logger.warning(
-                "ESRNET checkpoint not found, start training from the beginning..."
+                "Real-ESRNET checkpoint not found, start training from the beginning..."
             )
 
     if config.LOAD_REAL_ESRGAN_CHECKPOINT:
