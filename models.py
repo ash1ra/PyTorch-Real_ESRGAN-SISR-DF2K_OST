@@ -32,7 +32,7 @@ class ConvBlock(nn.Module):
         padding: int = 1,
         activation: Literal["leaky_relu", "tanh"] | None = None,
         spectral_norm: bool = False,
-        bias: bool = False,
+        bias: bool = True,
     ) -> None:
         super().__init__()
 
@@ -200,7 +200,7 @@ class Generator(nn.Module):
             padding=4,
         )
 
-        self.rrdb_sequence = nn.Sequential(
+        self.rrdb = nn.Sequential(
             *[
                 RRDB(
                     channels_count=channels_count,
@@ -245,7 +245,7 @@ class Generator(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         output = self.conv_block1(x)
         residual = output
-        output = self.rrdb_sequence(output)
+        output = self.rrdb(output)
         output = self.conv_block2(output)
         output += residual
         output = self.subpixel_conv_blocks(output)
@@ -371,6 +371,8 @@ class Discriminator(nn.Module):
             spectral_norm=False,
             bias=True,
         )
+
+        self.apply(lambda fn: _init_scaled_weights(fn, scale=1.0))
 
     def forward(self, x: Tensor) -> Tensor:
         x0 = self.conv0(x)

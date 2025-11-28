@@ -2,130 +2,22 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-import torch.nn.functional as F
 from safetensors.torch import load_file
-from torch import Tensor, nn
+from torch import nn
 from torchvision.io import decode_image, write_png
 from torchvision.transforms import v2 as transforms
 
 import config
 from models import Generator
-from utils import compare_imgs, convert_img, load_checkpoint
+from utils import (
+    apply_network_interpolation,
+    compare_imgs,
+    convert_img,
+    load_checkpoint,
+    upscale_img_tiled,
+)
 
 logger = config.create_logger("INFO", __file__)
-
-
-def apply_network_interpolation(
-    model: nn.Module,
-    params_psnr: dict,
-    params_esrgan: dict,
-    alpha: float,
-) -> None:
-    logger.info("Creating network interpolated model...")
-
-    params_interpolated = dict()
-
-    for key in params_psnr.keys():
-        if key in params_esrgan:
-            tensor_psnr = params_psnr[key].float()
-            tensor_esrgan = params_esrgan[key].float()
-
-            params_interpolated[key] = (1 - alpha) * tensor_psnr + alpha * tensor_esrgan
-        else:
-            logger.warning(
-                f'Key "{key}" not found in ESRGAN model. Copying from PSNR-oriented model...'
-            )
-            params_interpolated[key] = params_psnr[key].float()
-
-    model.load_state_dict(params_interpolated)
-
-
-def upscale_img_tiled(
-    model: nn.Module,
-    lr_img_tensor: Tensor,
-    scale_factor: Literal[2, 4, 8] = 4,
-    tile_size: int = 512,
-    tile_overlap: int = 64,
-    device: Literal["cuda", "cpu"] = "cpu",
-) -> Tensor:
-    batch_size, channels, height_original, width_original = lr_img_tensor.shape
-
-    height_target = height_original * scale_factor
-    width_target = width_original * scale_factor
-
-    border_pad = tile_overlap // 2
-
-    lr_img_tensor_padded = F.pad(
-        lr_img_tensor, (border_pad, border_pad, border_pad, border_pad), "reflect"
-    )
-
-    _, _, height_padded, width_padded = lr_img_tensor_padded.shape
-
-    step_size = tile_size - tile_overlap
-
-    pad_right = (step_size - (width_padded - tile_size) % step_size) % step_size
-    pad_bottom = (step_size - (height_padded - tile_size) % step_size) % step_size
-
-    lr_img_tensor_padded = F.pad(
-        lr_img_tensor_padded, (0, pad_right, 0, pad_bottom), "reflect"
-    )
-
-    _, _, height_final, width_final = lr_img_tensor_padded.shape
-
-    logger.info(
-        f"Original LR: {width_original}x{height_original} | Target SR: {width_target}x{height_target}"
-    )
-
-    final_img_canvas = torch.zeros(
-        (batch_size, channels, height_final * scale_factor, width_final * scale_factor),
-        dtype=lr_img_tensor.dtype,
-        device="cpu",
-    )
-
-    count_canvas = torch.zeros_like(final_img_canvas, device="cpu")
-
-    for height in range(0, height_final - tile_size + 1, step_size):
-        for width in range(0, width_final - tile_size + 1, step_size):
-            lr_img_tensor_tile = lr_img_tensor_padded[
-                :, :, height : height + tile_size, width : width + tile_size
-            ]
-
-            with torch.inference_mode():
-                sr_img_tensor_tile = model(lr_img_tensor_tile).cpu()
-
-            final_height_start = height * scale_factor
-            final_width_start = width * scale_factor
-            final_height_end = (height + tile_size) * scale_factor
-            final_width_end = (width + tile_size) * scale_factor
-
-            final_img_canvas[
-                :,
-                :,
-                final_height_start:final_height_end,
-                final_width_start:final_width_end,
-            ] += sr_img_tensor_tile
-
-            count_canvas[
-                :,
-                :,
-                final_height_start:final_height_end,
-                final_width_start:final_width_end,
-            ] += 1
-
-    logger.info("All tiles processed. Blending results...")
-
-    output_padded = final_img_canvas / count_canvas
-
-    final_border_pad = border_pad * scale_factor
-
-    final_output = output_padded[
-        :,
-        :,
-        final_border_pad : final_border_pad + height_target,
-        final_border_pad : final_border_pad + width_target,
-    ]
-
-    return final_output
 
 
 def inference(

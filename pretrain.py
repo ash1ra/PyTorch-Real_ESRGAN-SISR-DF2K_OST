@@ -31,7 +31,6 @@ def train_step(
     content_loss_fn: nn.Module,
     generator_optimizer: optim.Optimizer,
     generator_scaler: GradScaler | None = None,
-    generator_scheduler: MultiStepLR | None = None,
     device: Literal["cuda", "cpu"] = "cpu",
 ) -> float:
     total_generator_loss = 0.0
@@ -176,7 +175,6 @@ def train(
                 content_loss_fn=content_loss_fn,
                 generator_optimizer=generator_optimizer,
                 generator_scaler=generator_scaler,
-                generator_scheduler=generator_scheduler,
                 device=device,
             )
 
@@ -239,7 +237,9 @@ def train(
                 generator_scheduler=generator_scheduler,
             )
 
-        plot_training_metrics(metrics, create_hyperparameters_str(), model_type="psnr")
+        plot_training_metrics(
+            metrics, create_hyperparameters_str(), model_type="real-esrnet"
+        )
 
     except KeyboardInterrupt:
         logger.info("Saving model's weights and finish training...")
@@ -253,7 +253,9 @@ def train(
             generator_scheduler=generator_scheduler,
         )
 
-        plot_training_metrics(metrics, create_hyperparameters_str(), model_type="psnr")
+        plot_training_metrics(
+            metrics, create_hyperparameters_str(), model_type="real-esrnet"
+        )
 
 
 def main() -> None:
@@ -367,13 +369,22 @@ def main() -> None:
                 device=device,
             )
 
-            if generator_scheduler and start_epoch > 1:
-                epochs_to_skip = start_epoch - 1
+            for param_group in generator_optimizer.param_groups:
+                param_group["lr"] = config.GENERATOR_LEARNING_RATE
+            if generator_scheduler:
+                generator_scheduler.base_lrs = [config.GENERATOR_LEARNING_RATE] * len(
+                    generator_optimizer.param_groups
+                )
 
-                for _ in range(epochs_to_skip):
-                    generator_scheduler.step()
-
-                logger.info(f"Schedulers advanced to epoch {start_epoch}")
+            metrics.epochs = config.EPOCHS
+            #
+            # if generator_scheduler and start_epoch > 1:
+            #     epochs_to_skip = start_epoch - 1
+            #
+            #     for _ in range(epochs_to_skip):
+            #         generator_scheduler.step()
+            #
+            #     logger.info(f"Schedulers advanced to epoch {start_epoch}")
         else:
             logger.warning(
                 "No checkpoints were found, start training from the beginning..."

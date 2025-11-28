@@ -1,3 +1,4 @@
+import gc
 from time import time
 from typing import Literal
 
@@ -13,14 +14,16 @@ import config
 from data_processing import SRDataset
 from models import Discriminator, Generator, TruncatedVGG19
 from utils import (
-    Metrics,
     EMAModel,
+    Metrics,
     convert_img,
     create_hyperparameters_str,
     format_time,
     load_checkpoint,
     plot_training_metrics,
     save_checkpoint,
+    upscale_img_tiled,
+    worker_init_fn,
 )
 
 logger = config.create_logger("INFO", __file__)
@@ -39,8 +42,6 @@ def train_step(
     discriminator_optimizer: optim.Optimizer,
     generator_scaler: GradScaler | None = None,
     discriminator_scaler: GradScaler | None = None,
-    generator_scheduler: MultiStepLR | None = None,
-    discriminator_scheduler: MultiStepLR | None = None,
     device: Literal["cuda", "cpu"] = "cpu",
 ) -> tuple[float, float]:
     total_generator_loss = 0.0
@@ -49,34 +50,33 @@ def train_step(
     generator.train()
     discriminator.train()
 
-    generator_optimizer.zero_grad()
-    discriminator_optimizer.zero_grad()
-
     for i, (hr_img_tensor, lr_img_tensor) in enumerate(data_loader):
         hr_img_tensor = hr_img_tensor.to(device, non_blocking=True)
         lr_img_tensor = lr_img_tensor.to(device, non_blocking=True)
 
-        with autocast(device, enabled=(generator_scaler is not None)):
+        with autocast(device, dtype=torch.bfloat16, enabled=True):
             sr_img_tensor = generator(lr_img_tensor)
 
             sr_img_tensor_imagenet = convert_img(sr_img_tensor, "[-1, 1]", "imagenet")
             hr_img_tensor_imagenet = convert_img(hr_img_tensor, "[-1, 1]", "imagenet")
 
             sr_img_features_tensor = truncated_vgg19(sr_img_tensor_imagenet)
-            hr_img_features_tensor = truncated_vgg19(hr_img_tensor_imagenet)
+            with torch.no_grad():
+                hr_img_features_tensor = truncated_vgg19(hr_img_tensor_imagenet)
 
             perceptual_loss = 0.0
 
             for layer_name, weight in config.PERCEPTUAL_LOSS_LAYER_WEIGHTS.items():
                 sr_img_feature_tensor = sr_img_features_tensor[layer_name]
-                hr_img_feature_tensor = hr_img_features_tensor[layer_name].detach()
+                hr_img_feature_tensor = hr_img_features_tensor[layer_name]
 
                 layer_loss = perceptual_loss_fn(
                     sr_img_feature_tensor, hr_img_feature_tensor
                 )
                 perceptual_loss += weight * layer_loss
 
-            hr_discriminated = discriminator(hr_img_tensor).detach()
+            with torch.no_grad():
+                hr_discriminated = discriminator(hr_img_tensor)
             sr_discriminated = discriminator(sr_img_tensor)
 
             hr_discriminated_avg = hr_discriminated.mean(dim=0, keepdim=True)
@@ -113,32 +113,28 @@ def train_step(
         else:
             generator_loss_w_graph.backward()
 
-        ema_handler.update()
+        # with autocast(device, dtype=torch.bfloat16, enabled=False):
+        hr_discriminated = discriminator(hr_img_tensor.float())
+        sr_discriminated = discriminator(sr_img_tensor.float().detach())
 
-        with autocast(device, enabled=(discriminator_scaler is not None)):
-            hr_discriminated = discriminator(hr_img_tensor)
-            sr_discriminated = discriminator(sr_img_tensor.detach())
+        hr_discriminated_avg = hr_discriminated.mean(dim=0, keepdim=True)
+        sr_discriminated_avg = sr_discriminated.mean(dim=0, keepdim=True)
 
-            hr_discriminated_avg = hr_discriminated.mean(dim=0, keepdim=True)
-            sr_discriminated_avg = sr_discriminated.mean(dim=0, keepdim=True)
+        hr_discriminated_relative = hr_discriminated - sr_discriminated_avg.detach()
+        sr_discriminated_relative = sr_discriminated - hr_discriminated_avg.detach()
 
-            hr_discriminated_relative = hr_discriminated - sr_discriminated_avg.detach()
-            sr_discriminated_relative = sr_discriminated - hr_discriminated_avg.detach()
-
-            adversarial_loss = (
-                adversarial_loss_fn(
-                    sr_discriminated_relative,
-                    torch.zeros_like(sr_discriminated_relative),
-                )
-                + adversarial_loss_fn(
-                    hr_discriminated_relative,
-                    torch.ones_like(hr_discriminated_relative),
-                )
-            ) / 2
-
-            adversarial_loss_w_graph = (
-                adversarial_loss / config.GRADIENT_ACCUMULATION_STEPS
+        adversarial_loss = (
+            adversarial_loss_fn(
+                sr_discriminated_relative,
+                torch.zeros_like(sr_discriminated_relative),
             )
+            + adversarial_loss_fn(
+                hr_discriminated_relative,
+                torch.ones_like(hr_discriminated_relative),
+            )
+        ) / 2
+
+        adversarial_loss_w_graph = adversarial_loss / config.GRADIENT_ACCUMULATION_STEPS
 
         total_discriminator_loss += adversarial_loss.item()
 
@@ -176,14 +172,16 @@ def train_step(
                 )
                 discriminator_optimizer.step()
 
+            ema_handler.update()
+
             generator_optimizer.zero_grad()
             discriminator_optimizer.zero_grad()
 
         if i % config.PRINT_FREQUENCY == 0:
             logger.debug(f"Processing batch {i}/{len(data_loader)}...")
 
-    total_generator_loss *= config.GRADIENT_ACCUMULATION_STEPS / len(data_loader)
-    total_discriminator_loss *= config.GRADIENT_ACCUMULATION_STEPS / len(data_loader)
+    total_generator_loss /= len(data_loader)
+    total_discriminator_loss /= len(data_loader)
 
     return total_generator_loss, total_discriminator_loss
 
@@ -203,30 +201,19 @@ def validation_step(
 
     with torch.inference_mode():
         for hr_img_tensor, lr_img_tensor in data_loader:
-            hr_img_tensor = hr_img_tensor.to(device, non_blocking=True)
-            lr_img_tensor = lr_img_tensor.to(device, non_blocking=True)
+            sr_img_full = upscale_img_tiled(
+                model=generator,
+                lr_img_tensor=lr_img_tensor,
+                scale_factor=config.SCALING_FACTOR,
+                tile_size=config.TILE_SIZE,
+                tile_overlap=config.TILE_OVERLAP,
+                device=device,
+            )
 
-            sr_img_tensor = generator(lr_img_tensor)
+            hr_img_cpu = hr_img_tensor.cpu()
 
-            sr_img_tensor_imagenet = convert_img(sr_img_tensor, "[-1, 1]", "imagenet")
-            hr_img_tensor_imagenet = convert_img(hr_img_tensor, "[-1, 1]", "imagenet")
-
-            sr_img_features_tensor = truncated_vgg19(sr_img_tensor_imagenet)
-            hr_img_features_tensor = truncated_vgg19(hr_img_tensor_imagenet)
-
-            perceptual_loss = 0.0
-
-            for layer_name, weight in config.PERCEPTUAL_LOSS_LAYER_WEIGHTS.items():
-                sr_img_feature_tensor = sr_img_features_tensor[layer_name]
-                hr_img_feature_tensor = hr_img_features_tensor[layer_name].detach()
-
-                layer_loss = perceptual_loss_fn(
-                    sr_img_feature_tensor, hr_img_feature_tensor
-                )
-                perceptual_loss += weight * layer_loss
-
-            y_hr_tensor = convert_img(hr_img_tensor, "[-1, 1]", "y-channel")
-            y_sr_tensor = convert_img(sr_img_tensor, "[-1, 1]", "y-channel")
+            y_hr_tensor = convert_img(hr_img_cpu, "[-1, 1]", "y-channel")
+            y_sr_tensor = convert_img(sr_img_full, "[-1, 1]", "y-channel")
 
             sf = config.SCALING_FACTOR
             y_hr_tensor = y_hr_tensor[:, :, sf:-sf, sf:-sf]
@@ -235,7 +222,41 @@ def validation_step(
             psnr_metric.update(y_sr_tensor, y_hr_tensor)  # type: ignore
             ssim_metric.update(y_sr_tensor, y_hr_tensor)  # type: ignore
 
-            total_perceptual_loss += perceptual_loss
+            _, _, h_sr, w_sr = sr_img_full.shape
+
+            if h_sr > config.CROP_SIZE and w_sr > config.CROP_SIZE:
+                top = (h_sr - config.CROP_SIZE) // 2
+                left = (w_sr - config.CROP_SIZE) // 2
+
+                sr_crop = sr_img_full[
+                    :, :, top : top + config.CROP_SIZE, left : left + config.CROP_SIZE
+                ]
+
+                hr_crop = hr_img_cpu[
+                    :, :, top : top + config.CROP_SIZE, left : left + config.CROP_SIZE
+                ]
+
+                sr_crop = sr_crop.to(device)
+                hr_crop = hr_crop.to(device)
+            else:
+                sr_crop = sr_img_full.to(device)
+                hr_crop = hr_img_cpu.to(device)
+
+            sr_crop_imagenet = convert_img(sr_crop, "[-1, 1]", "imagenet")
+            hr_crop_imagenet = convert_img(hr_crop, "[-1, 1]", "imagenet")
+
+            with torch.no_grad():
+                sr_features = truncated_vgg19(sr_crop_imagenet)
+                hr_features = truncated_vgg19(hr_crop_imagenet)
+
+            perceptual_loss = torch.tensor(0.0, device=device)
+            for layer_name, weight in config.PERCEPTUAL_LOSS_LAYER_WEIGHTS.items():
+                layer_loss = perceptual_loss_fn(
+                    sr_features[layer_name], hr_features[layer_name]
+                )
+                perceptual_loss += weight * layer_loss
+
+            total_perceptual_loss += perceptual_loss.item()
 
         total_perceptual_loss /= len(data_loader)
         total_psnr = psnr_metric.compute().item()  # type: ignore
@@ -303,11 +324,6 @@ def train(
     logger.info("-" * dashes_count)
     logger.info("U-Net Discriminator:")
     logger.info(f"Count of channels: {config.DISCRIMINATOR_CHANNELS_COUNT}")
-    logger.info(f"Count of Conv blocks: {config.DISCRIMINATOR_CONV_BLOCKS_COUNT}")
-    logger.info(
-        f"Size of the first linear layer: {config.DISCRIMINATOR_LINEAR_LAYER_SIZE}"
-    )
-    logger.info(f"Kernel size: {config.DISCRIMINATOR_KERNEL_SIZE}")
     logger.info(
         f"Discriminator initial learning rate: {config.DISCRIMINATOR_LEARNING_RATE}"
     )
@@ -332,10 +348,11 @@ def train(
                 discriminator_optimizer=discriminator_optimizer,
                 generator_scaler=generator_scaler,
                 discriminator_scaler=discriminator_scaler,
-                generator_scheduler=generator_scheduler,
-                discriminator_scheduler=discriminator_scheduler,
                 device=device,
             )
+
+            gc.collect()
+            torch.cuda.empty_cache()
 
             generator_val_loss, generator_val_psnr, generator_val_ssim = (
                 validation_step(
@@ -348,6 +365,9 @@ def train(
                     device=device,
                 )
             )
+
+            gc.collect()
+            torch.cuda.empty_cache()
 
             if generator_scheduler:
                 generator_scheduler.step()
@@ -412,7 +432,7 @@ def train(
             )
 
         plot_training_metrics(
-            metrics, create_hyperparameters_str(), model_type="esrgan"
+            metrics, create_hyperparameters_str(), model_type="real-esrgan"
         )
 
     except KeyboardInterrupt:
@@ -432,11 +452,15 @@ def train(
         )
 
         plot_training_metrics(
-            metrics, create_hyperparameters_str(), model_type="esrgan"
+            metrics, create_hyperparameters_str(), model_type="real-esrgan"
         )
 
 
 def main() -> None:
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     train_dataset = SRDataset(
@@ -460,6 +484,9 @@ def main() -> None:
         shuffle=True,
         pin_memory=True if device == "cuda" else False,
         num_workers=config.NUM_WORKERS,
+        persistent_workers=True,
+        prefetch_factor=4,
+        worker_init_fn=worker_init_fn,
     )
 
     val_data_loader = DataLoader(
@@ -468,6 +495,9 @@ def main() -> None:
         shuffle=False,
         pin_memory=True if device == "cuda" else False,
         num_workers=config.NUM_WORKERS,
+        persistent_workers=True,
+        prefetch_factor=4,
+        worker_init_fn=worker_init_fn,
     )
 
     generator = Generator(
@@ -501,8 +531,8 @@ def main() -> None:
     adversarial_loss_fn = nn.BCEWithLogitsLoss()
 
     metrics = Metrics()
-    psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
-    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    psnr_metric = PeakSignalNoiseRatio(data_range=1.0)
+    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0)
 
     generator_optimizer = optim.Adam(
         generator.parameters(), lr=config.GENERATOR_LEARNING_RATE
@@ -511,8 +541,8 @@ def main() -> None:
         discriminator.parameters(), lr=config.DISCRIMINATOR_LEARNING_RATE
     )
 
-    generator_scaler = GradScaler(device) if device == "cuda" else None
-    discriminator_scaler = GradScaler(device) if device == "cuda" else None
+    # generator_scaler = GradScaler(device) if device == "cuda" else None
+    # discriminator_scaler = GradScaler(device) if device == "cuda" else None
 
     generator_scheduler = MultiStepLR(
         optimizer=generator_optimizer,
@@ -552,7 +582,7 @@ def main() -> None:
             or config.REAL_ESRGAN_CHECKPOINT_DIR_PATH.exists()
         ):
             if (
-                config.LOAD_BEST_ESRGAN_CHECKPOINT
+                config.LOAD_BEST_REAL_ESRGAN_CHECKPOINT
                 and config.BEST_REAL_ESRGAN_CHECKPOINT_DIR_PATH.exists()
             ):
                 checkpoint_dir_path_to_load = (
@@ -574,21 +604,37 @@ def main() -> None:
                 generator_optimizer=generator_optimizer,
                 discriminator_optimizer=discriminator_optimizer,
                 metrics=metrics,
-                generator_scaler=generator_scaler,
-                discriminator_scaler=discriminator_scaler,
+                # generator_scaler=generator_scaler,
+                # discriminator_scaler=discriminator_scaler,
                 generator_scheduler=generator_scheduler,
                 discriminator_scheduler=discriminator_scheduler,
                 device=device,
             )
 
-            if generator_scheduler and discriminator_scheduler and start_epoch > 1:
-                epochs_to_skip = start_epoch - 1
+            for param_group in generator_optimizer.param_groups:
+                param_group["lr"] = config.GENERATOR_LEARNING_RATE
+            if generator_scheduler:
+                generator_scheduler.base_lrs = [config.GENERATOR_LEARNING_RATE] * len(
+                    generator_optimizer.param_groups
+                )
 
-                for _ in range(epochs_to_skip):
-                    generator_scheduler.step()
-                    discriminator_scheduler.step()
+            for param_group in discriminator_optimizer.param_groups:
+                param_group["lr"] = config.DISCRIMINATOR_LEARNING_RATE
+            if discriminator_scheduler:
+                discriminator_scheduler.base_lrs = [
+                    config.DISCRIMINATOR_LEARNING_RATE
+                ] * len(discriminator_optimizer.param_groups)
 
-                logger.info(f"Schedulers advanced to epoch {start_epoch}")
+            metrics.epochs = config.EPOCHS
+            #
+            # if generator_scheduler and discriminator_scheduler and start_epoch > 1:
+            #     epochs_to_skip = start_epoch - 1
+            #
+            #     for _ in range(epochs_to_skip):
+            #         generator_scheduler.step()
+            #         discriminator_scheduler.step()
+            #
+            #     logger.info(f"Schedulers advanced to epoch {start_epoch}")
         else:
             logger.warning(
                 "ESRGAN checkpoints not found, start training from the beginning..."
@@ -597,6 +643,10 @@ def main() -> None:
     ema_handler = EMAModel(
         source_model=generator, target_model=ema_generator, decay=0.999
     )
+
+    logger.info("Compiling models...")
+    generator.compile()
+    # discriminator.compile()
 
     train(
         train_data_loader=train_data_loader,
@@ -615,8 +665,8 @@ def main() -> None:
         metrics=metrics,
         psnr_metric=psnr_metric,
         ssim_metric=ssim_metric,
-        generator_scaler=generator_scaler,
-        discriminator_scaler=discriminator_scaler,
+        # generator_scaler=generator_scaler,
+        # discriminator_scaler=discriminator_scaler,
         generator_scheduler=generator_scheduler,
         discriminator_scheduler=discriminator_scheduler,
         device=device,

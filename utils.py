@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from safetensors.torch import load_file, save_file
 from scipy import special
@@ -263,12 +264,12 @@ class ImgDegradationPipeline:
                 vals = len(np.unique(gray))
                 vals = 2 ** np.ceil(np.log2(vals))
 
-                noise = np.random.poisson(gray * scale) / scale - gray
+                noise = np.random.poisson(np.maximum(gray * scale, 0)) / scale - gray
                 noise = noise[:, :, np.newaxis]
                 noise = np.repeat(noise, c, axis=2)
                 img = img + noise
             else:
-                noise = np.random.poisson(img * scale) / scale - img
+                noise = np.random.poisson(np.maximum(img * scale, 0)) / scale - img
                 img = img + noise
 
         return np.clip(img, 0, 255).astype(np.uint8)
@@ -348,6 +349,13 @@ class ImgDegradationPipeline:
         out_rgb = np.clip(out_rgb, 0, 255).astype(np.uint8)
 
         return out_rgb
+
+
+def worker_init_fn(worker_id: int) -> None:
+    import cv2
+
+    cv2.setNumThreads(0)
+    cv2.ocl.setUseOpenCL(False)
 
 
 def apply_usm_sharpening(img: np.ndarray, amount: float, radius: int, threshold: int):
@@ -538,7 +546,7 @@ def compare_imgs(
     orientation: Literal["horizontal", "vertical"] = "vertical",
 ) -> None:
     bicubic_label = "Bicubic"
-    sr_label = "SRGAN"
+    sr_label = "Real-ESRGAN"
     hr_label = "Original"
 
     lr_img = convert_img(lr_img_tensor, "[-1, 1]", "pil")
@@ -903,7 +911,7 @@ def create_hyperparameters_str() -> str:
 def plot_training_metrics(
     metrics: Metrics,
     hyperparameters_str: str,
-    model_type: Literal["psnr", "esrgan"],
+    model_type: Literal["real-esrnet", "real-esrgan"],
 ) -> None:
     sns.set_style("whitegrid")
     sns.set_palette("deep")
@@ -913,10 +921,10 @@ def plot_training_metrics(
 
     fig, axs = plt.subplots(2, 2, figsize=(14, 10))
 
-    if model_type == "psnr":
-        fig.suptitle("PSNR-based Generator Training Metrics", fontsize=18)
+    if model_type == "real-esrnet":
+        fig.suptitle("Real-ESRNET Training Metrics", fontsize=18)
     else:
-        fig.suptitle("ESRGAN Training Metrics", fontsize=18)
+        fig.suptitle("Real-ESRGAN Training Metrics", fontsize=18)
 
     fig.text(0.5, 0.94, hyperparameters_str, ha="center", va="top", fontsize=10)
 
@@ -929,7 +937,7 @@ def plot_training_metrics(
         color=palette[0],
     )
 
-    if model_type == "esrgan":
+    if model_type == "real-esrgan":
         sns.lineplot(
             x=epochs,
             y=metrics.generator_val_losses,
@@ -953,7 +961,7 @@ def plot_training_metrics(
         axs[0, 1].set_xlabel("Epoch")
         axs[0, 1].set_ylabel("Loss")
 
-    elif model_type == "psnr":
+    elif model_type == "real-esrnet":
         axs[0, 0].set_title("Generator training loss")
         axs[0, 0].set_xlabel("Epoch")
         axs[0, 0].set_ylabel("Loss")
@@ -1003,3 +1011,116 @@ def plot_training_metrics(
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
 
     plt.show()
+
+
+def apply_network_interpolation(
+    model: nn.Module,
+    params_psnr: dict,
+    params_esrgan: dict,
+    alpha: float,
+) -> None:
+    logger.info("Creating network interpolated model...")
+
+    params_interpolated = dict()
+
+    for key in params_psnr.keys():
+        if key in params_esrgan:
+            tensor_psnr = params_psnr[key].float()
+            tensor_esrgan = params_esrgan[key].float()
+
+            params_interpolated[key] = (1 - alpha) * tensor_psnr + alpha * tensor_esrgan
+        else:
+            logger.warning(
+                f'Key "{key}" not found in Real-ESRGAN model. Copying from Real-ESRNET model...'
+            )
+            params_interpolated[key] = params_psnr[key].float()
+
+    model.load_state_dict(params_interpolated)
+
+
+def upscale_img_tiled(
+    model: nn.Module,
+    lr_img_tensor: Tensor,
+    scale_factor: Literal[2, 4, 8] = 4,
+    tile_size: int = 512,
+    tile_overlap: int = 64,
+    device: Literal["cuda", "cpu"] = "cpu",
+) -> Tensor:
+    batch_size, channels, height_original, width_original = lr_img_tensor.shape
+
+    height_target = height_original * scale_factor
+    width_target = width_original * scale_factor
+
+    border_pad = tile_overlap // 2
+
+    lr_img_tensor_padded = F.pad(
+        lr_img_tensor, (border_pad, border_pad, border_pad, border_pad), "reflect"
+    )
+
+    _, _, height_padded, width_padded = lr_img_tensor_padded.shape
+
+    step_size = tile_size - tile_overlap
+
+    pad_right = (step_size - (width_padded - tile_size) % step_size) % step_size
+    pad_bottom = (step_size - (height_padded - tile_size) % step_size) % step_size
+
+    lr_img_tensor_padded = F.pad(
+        lr_img_tensor_padded, (0, pad_right, 0, pad_bottom), "reflect"
+    )
+
+    _, _, height_final, width_final = lr_img_tensor_padded.shape
+
+    logger.debug(
+        f"Original LR: {width_original}x{height_original} | Target SR: {width_target}x{height_target}"
+    )
+
+    final_img_canvas = torch.zeros(
+        (batch_size, channels, height_final * scale_factor, width_final * scale_factor),
+        dtype=lr_img_tensor.dtype,
+        device="cpu",
+    )
+
+    count_canvas = torch.zeros_like(final_img_canvas, device="cpu")
+
+    for height in range(0, height_final - tile_size + 1, step_size):
+        for width in range(0, width_final - tile_size + 1, step_size):
+            lr_img_tensor_tile = lr_img_tensor_padded[
+                :, :, height : height + tile_size, width : width + tile_size
+            ].to(device, non_blocking=True)
+
+            with torch.inference_mode():
+                sr_img_tensor_tile = model(lr_img_tensor_tile).cpu()
+
+            final_height_start = height * scale_factor
+            final_width_start = width * scale_factor
+            final_height_end = (height + tile_size) * scale_factor
+            final_width_end = (width + tile_size) * scale_factor
+
+            final_img_canvas[
+                :,
+                :,
+                final_height_start:final_height_end,
+                final_width_start:final_width_end,
+            ] += sr_img_tensor_tile
+
+            count_canvas[
+                :,
+                :,
+                final_height_start:final_height_end,
+                final_width_start:final_width_end,
+            ] += 1
+
+    logger.debug("All tiles processed. Blending results...")
+
+    output_padded = final_img_canvas / count_canvas
+
+    final_border_pad = border_pad * scale_factor
+
+    final_output = output_padded[
+        :,
+        :,
+        final_border_pad : final_border_pad + height_target,
+        final_border_pad : final_border_pad + width_target,
+    ]
+
+    return final_output
